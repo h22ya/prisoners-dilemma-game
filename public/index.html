@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>협력 vs 배신 - 교실 게임</title>
+<style>
+body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:900px;margin:0 auto;padding:24px;background:#f6f7fb;color:#202124}
+.card{background:white;border-radius:18px;padding:22px;margin:14px 0;box-shadow:0 3px 14px #00000010}
+h1{margin-top:0}.muted{color:#666}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+button{border:0;border-radius:12px;padding:13px 18px;font-size:16px;cursor:pointer;background:#222;color:#fff}
+button:disabled{opacity:.45;cursor:not-allowed}.coop{background:#3b82f6}.betray{background:#ef4444}
+input{padding:12px;border:1px solid #ddd;border-radius:10px;font-size:16px;width:100%;box-sizing:border-box;margin:6px 0 12px}
+.badge{display:inline-block;padding:5px 9px;border-radius:999px;background:#eee;margin:3px;font-size:13px}
+table{width:100%;border-collapse:collapse}td,th{padding:9px;border-bottom:1px solid #eee;text-align:left}
+#qr{max-width:260px}.hidden{display:none}.choice{font-weight:700}
+</style>
+</head>
+<body>
+<h1>🤝 협력 vs 배신</h1>
+<div id="app"></div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket=io();
+const app=document.getElementById("app");
+const params=new URLSearchParams(location.search);
+let role=null, code=params.get("room")||"", myState=null, teacherState=null;
+
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function render(){
+ if(!role) return renderLanding();
+ if(role==="teacher") return renderTeacher();
+ return renderStudent();
+}
+function renderLanding(){
+ app.innerHTML=`<div class="card">
+ <h2>교사</h2><p class="muted">교사가 방을 만들고 학생들이 QR/방 코드로 입장합니다.</p>
+ <button onclick="create()">새 게임방 만들기</button>
+ </div>
+ <div class="card">
+ <h2>학생</h2>
+ <label>방 코드</label><input id="room" value="${esc(code)}" placeholder="예: A1B2C">
+ <label>닉네임</label><input id="nick" placeholder="친구들이 알아볼 이름">
+ <button onclick="join()">게임 참가</button>
+ <p class="muted">닉네임은 같은 방에서 중복될 수 없습니다.</p></div>`;
+}
+function create(){
+ socket.emit("createRoom",{},r=>{if(!r.ok)return alert(r.error);role="teacher";code=r.code;window.history.replaceState({},'',`?room=${code}`);teacherState={};render();});
+}
+function join(){
+ code=document.getElementById("room").value.trim().toUpperCase();
+ const nickname=document.getElementById("nick").value.trim();
+ socket.emit("joinRoom",{code,nickname},r=>{if(!r.ok)return alert(r.error);role="student";render();});
+}
+function renderTeacher(){
+ const s=teacherState||{};
+ const players=s.players||[];
+ const status=players.map(p=>`<span class="badge">${esc(p.nickname)} ${p.connected?'🟢':'⚪'}</span>`).join('');
+ let results='';
+ if(s.results?.length){
+   results=s.results.map((rr,i)=>`<div class="card"><h3>${i+1}라운드 결과</h3><table><tr><th>학생 A</th><th>선택</th><th>학생 B</th><th>선택</th><th>점수</th></tr>${
+    rr.map(x=>`<tr><td>${esc(x.aNickname)}</td><td>${x.aChoice==="C"?"협력":"배신"}</td><td>${esc(x.bNickname)}</td><td>${x.bChoice==="C"?"협력":"배신"}</td><td>${x.aPoints} : ${x.bPoints}</td></tr>`).join('')
+   }</table></div>`).join('');
+ }
+ app.innerHTML=`<div class="card"><h2>교사 화면</h2><p>방 코드: <b>${esc(code)}</b></p>
+ <p class="muted">학생에게 아래 QR 또는 방 코드를 보여주세요.</p><div id="qrwrap"></div>
+ <p>참가자 (${players.length}명)</p><div>${status||"아직 없음"}</div>
+ <p>현재 라운드: <b>${s.round||0}/3</b> ${s.bye?` · 이번 라운드 쉬는 학생: ${esc(players.find(p=>p.id===s.bye)?.nickname||"")}`:""}</p>
+ ${s.phase==="lobby"?`<button onclick="start()">1라운드 시작</button>`:""}
+ ${s.phase==="roundResult"&&s.round<3?`<button onclick="nextRound()">다음 라운드 시작 (무작위 재매칭)</button>`:""}
+ ${s.phase==="finished"?`<h3>🎉 게임 종료</h3>`:""}
+ <button onclick="resetGame()" style="margin-left:8px">게임 초기화</button></div>
+ ${s.phase==="playing"?`<div class="card"><h3>선택 현황</h3><p>${players.filter(p=>p.choices).length} / ${players.length}명 선택 완료</p></div>`:""}
+ ${results}
+ <div class="card"><h3>누적 순위</h3><table><tr><th>순위</th><th>닉네임</th><th>점수</th></tr>${[...players].sort((a,b)=>b.total-a.total).map((p,i)=>`<tr><td>${i+1}</td><td>${esc(p.nickname)}</td><td>${p.total}</td></tr>`).join('')}</table></div>`;
+ if(window.teacherQR) document.getElementById("qrwrap").innerHTML=`<img id="qr" src="${window.teacherQR}">`;
+}
+function renderStudent(){
+ const s=myState||{};
+ let body='';
+ if(s.phase==="lobby") body=`<p>게임 시작을 기다리는 중입니다.</p>`;
+ else if(s.bye) body=`<h2>이번 라운드는 쉬는 라운드입니다.</h2><p>다음 라운드에는 새로운 상대와 매칭됩니다.</p>`;
+ else if(s.phase==="playing") body=`<h2>${s.round}라운드</h2><h3>내 상대: ${esc(s.opponent?.nickname||"매칭 중")}</h3>
+ <p>상대의 선택은 내가 선택하기 전에는 볼 수 없습니다.</p>
+ <div class="grid"><button class="coop" onclick="choose('C')" ${s.myChoice?'disabled':''}>🤝 협력</button>
+ <button class="betray" onclick="choose('D')" ${s.myChoice?'disabled':''}>⚡ 배신</button></div>
+ ${s.myChoice?`<p>내 선택: <span class="choice">${s.myChoice==="C"?"협력":"배신"}</span> · 상대가 선택할 때까지 기다려주세요.</p>`:""}`;
+ else if(s.phase==="roundResult") body=`<h2>${s.round}라운드 결과</h2><h3>상대: ${esc(s.opponent?.nickname||"")}</h3>${resultText(s.result)}
+ <p>교사가 다음 라운드를 시작하면 <b>새로운 상대와 무작위 매칭</b>됩니다.</p>`;
+ else if(s.phase==="finished") body=`<h2>🎉 게임 종료!</h2><h3>총점: ${s.me?.total||0}점</h3><p>교사 화면에서 전체 결과를 확인하세요.</p>`;
+ app.innerHTML=`<div class="card"><h2>학생 화면</h2><p>닉네임: <b>${esc(s.me?.nickname||"")}</b></p>${body}</div>`;
+}
+function resultText(r){
+ if(!r)return "<p>결과를 집계 중입니다.</p>";
+ const mine=r.a===myState.me.id?{c:r.aChoice,p:r.aPoints,o:r.bNickname}:{c:r.bChoice,p:r.bPoints,o:r.aNickname};
+ const oppc= r.a===myState.me.id?r.bChoice:r.aChoice;
+ return `<p>상대: <b>${esc(mine.o)}</b></p><p>내 선택: <b>${mine.c==="C"?"협력":"배신"}</b> / 상대 선택: <b>${oppc==="C"?"협력":"배신"}</b></p><h3>이번 라운드 ${mine.p}점</h3>`;
+}
+function start(){socket.emit("startGame",{code},r=>{if(!r.ok)alert(r.error);});}
+function nextRound(){socket.emit("nextRound",{code},r=>{if(!r.ok)alert(r.error);});}
+function resetGame(){if(confirm("게임을 초기화할까요?"))socket.emit("reset",{code},r=>{if(!r.ok)alert(r.error);});}
+function choose(c){socket.emit("choose",{code,choice:c},r=>{if(!r.ok)alert(r.error);});}
+socket.on("teacherState",s=>{teacherState=s;render();});
+socket.on("studentState",s=>{myState=s;render();});
+socket.on("roomQR",d=>{window.teacherQR=d;render();});
+const originalCreate=socket.emit.bind(socket);
+socket.on("connect",()=>{});
+const oldCreate=create;
+create=()=>{socket.emit("createRoom",{},r=>{if(!r.ok)return alert(r.error);role="teacher";code=r.code;window.teacherQR=r.qr;window.history.replaceState({},'',`?room=${code}`);render();});};
+render();
+</script>
+</body>
+</html>
